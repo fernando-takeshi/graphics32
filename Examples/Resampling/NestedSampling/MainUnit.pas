@@ -39,7 +39,7 @@ interface
 {$I GR32.inc}
 
 uses
-  {$IFDEF FPC} LResources, {$ENDIF}
+  {$IFNDEF FPC} Windows, {$ELSE} LResources, {$ENDIF}
   SysUtils, Classes, Graphics, Controls, Forms, Dialogs, StdCtrls, ExtCtrls,
   TypInfo, SimplePropEdit, ComCtrls, Menus, ToolWin, ImgList, Buttons, ExtDlgs,
   GR32, GR32_Blend, GR32_Image, GR32_Math, GR32_Rasterizers, GR32_Resamplers,
@@ -253,7 +253,7 @@ begin
   Source := TBitmap32.Create;
   JPEG := TJPEGImage.Create;
   try
-    ResStream := TResourceStream.Create(HInstance, 'Stoneweed', 'JPG');
+    ResStream := TResourceStream.Create(HInstance, 'Stoneweed', RT_RCDATA);
     try
       JPEG.LoadFromStream(ResStream);
     finally
@@ -308,12 +308,19 @@ end;
 
 procedure TMainForm.FormDestroy(Sender: TObject);
 var
-  I: Integer;
+  I: Integer; C: TCustomSampler;
 begin
-  for I := 0 to Samplers.Count - 1 do
-    if not Assigned(Samplers[I]) then TCustomSampler(Samplers[I]).Free;
+  for I := 0 to Samplers.Count - 1 do begin
+    C := Samplers[I];
+    if C is TTransformer then
+      (C as TTransformer).Transformation.Free;
+    C.Free;
+  end;
   Samplers.Clear;
   Samplers.Free;
+  FreeAndNil(RenderThread);
+  FreeAndNil(Rasterizer);
+  FreeAndNil(Source);
 end;
 
 procedure TMainForm.lvSamplersSelectItem(Sender: TObject; Item: TListItem;

@@ -45,7 +45,7 @@ uses
 {$IFDEF FPC}
   LCLIntf, LCLType, LMessages, Types,
 {$ELSE}
-  Windows, Messages,
+  Windows, Messages, {$IFDEF COMPILERXE2_UP}Types,{$ENDIF}
 {$ENDIF}
   Graphics, Controls, Forms,
   Classes, SysUtils, GR32, GR32_Layers, GR32_RangeBars, GR32_Containers,
@@ -123,7 +123,6 @@ type
     procedure WMPaint(var Message: TMessage); message WM_PAINT;
     procedure CMMouseEnter(var Message: TMessage); message CM_MOUSEENTER;
     procedure CMMouseLeave(var Message: TMessage); message CM_MOUSELEAVE;
-    procedure CMInvalidate(var Message: TMessage); message CM_INVALIDATE;
 {$ENDIF}
     procedure DirectAreaUpdateHandler(Sender: TObject; const Area: TRect; const Info: Cardinal);
   protected
@@ -287,6 +286,8 @@ type
     procedure SetScaleMode(Value: TScaleMode); virtual;
     procedure SetXForm(ShiftX, ShiftY, ScaleX, ScaleY: TFloat);
     procedure UpdateCache; virtual;
+    function GetLayerCollectionClass: TLayerCollectionClass; virtual;
+    function CreateLayerCollection: TLayerCollection; virtual;
     property  UpdateCount: Integer read FUpdateCount;
   public
     constructor Create(AOwner: TComponent); override;
@@ -297,6 +298,7 @@ type
     procedure Changed; virtual;
     procedure Update(const Rect: TRect); reintroduce; overload; virtual;
     function  ControlToBitmap(const APoint: TPoint): TPoint;  overload;
+    function  ControlToBitmap(const ARect: TRect): TRect;  overload;
     function  ControlToBitmap(const APoint: TFloatPoint): TFloatPoint; overload;
     procedure EndUpdate; virtual;
     procedure ExecBitmapFrame(Dest: TBitmap32; StageNum: Integer); virtual;   // PST_BITMAP_FRAME
@@ -363,6 +365,7 @@ type
 {$ENDIF}
     property OnClick;
     property OnChange;
+    property OnContextPopup;
     property OnDblClick;
     property OnGDIOverlay;
     property OnDragDrop;
@@ -563,7 +566,7 @@ type
 implementation
 
 uses
-  Math, TypInfo, GR32_MicroTiles, GR32_Backends, GR32_XPThemes;
+  Math, TypInfo, GR32_MicroTiles, GR32_Backends, GR32_XPThemes, GR32_LowLevel;
 
 type
   TLayerAccess = class(TCustomLayer);
@@ -606,13 +609,13 @@ end;
 
 procedure TPaintStages.Delete(Index: Integer);
 var
-  Count: Integer;
+  LCount: Integer;
 begin
   if (Index < 0) or (Index > High(FItems)) then
     raise EListError.Create(RCStrInvalidStageIndex);
-  Count := Length(FItems) - Index - 1;
-  if Count > 0 then
-    Move(FItems[Index + 1], FItems[Index], Count * SizeOf(TPaintStage));
+  LCount := Length(FItems) - Index - 1;
+  if LCount > 0 then
+    Move(FItems[Index + 1], FItems[Index], LCount * SizeOf(TPaintStage));
   SetLength(FItems, High(FItems));
 end;
 
@@ -629,14 +632,14 @@ end;
 
 function TPaintStages.Insert(Index: Integer): PPaintStage;
 var
-  Count: Integer;
+  LCount: Integer;
 begin
   if Index < 0 then Index := 0
   else if Index > Length(FItems) then Index := Length(FItems);
-  Count := Length(FItems) - Index;
+  LCount := Length(FItems) - Index;
   SetLength(FItems, Length(FItems) + 1);
-  if Count > 0 then
-    Move(FItems[Index], FItems[Index + 1], Count * SizeOf(TPaintStage));
+  if LCount > 0 then
+    Move(FItems[Index], FItems[Index + 1], LCount * SizeOf(TPaintStage));
   Result := @FItems[Index];
   with Result^ do
   begin
@@ -649,19 +652,6 @@ end;
 
 
 { TCustomPaintBox32 }
-
-{$IFNDEF FPC}
-procedure TCustomPaintBox32.CMInvalidate(var Message: TMessage);
-begin
-  if CustomRepaint and HandleAllocated then
-    // we might have invalid rects, so just go ahead without invalidating
-    // the whole client area...
-    PostMessage(Handle, WM_PAINT, 0, 0)
-  else
-    // no invalid rects, so just invalidate the whole client area...
-    inherited;
-end;
-{$ENDIF}
 
 procedure TCustomPaintBox32.AssignTo(Dest: TPersistent);
 begin
@@ -704,8 +694,7 @@ begin
 
   { Setting a initial size here will cause the control to crash under LCL }
 {$IFNDEF FPC}
-  Height := 192;
-  Width := 192;
+  SetBounds(0, 0, 192, 192);
 {$ENDIF}
 end;
 
@@ -832,6 +821,7 @@ end;
 
 procedure TCustomPaintBox32.Loaded;
 begin
+  ResizeBuffer;
   FBufferValid := False;
   inherited;
 end;
@@ -896,7 +886,8 @@ end;
 
 procedure TCustomPaintBox32.Resize;
 begin
-  ResizeBuffer;
+  if (not (csLoading in ComponentState)) then
+    ResizeBuffer;
   BufferValid := False;
   inherited;
 end;
@@ -949,7 +940,8 @@ end;
 procedure TCustomPaintBox32.SetBounds(ALeft, ATop, AWidth, AHeight: Integer);
 begin
   inherited;
-  if csDesigning in ComponentState then ResizeBuffer;
+  if (not (csLoading in ComponentState)) then
+    ResizeBuffer;
   FBufferValid := False;
 end;
 
@@ -1046,14 +1038,7 @@ begin
   FBitmap := TBitmap32.Create;
   FBitmap.OnResize := BitmapResizeHandler;
 
-  FLayers := TLayerCollection.Create(Self);
-  with TLayerCollectionAccess(FLayers) do
-  begin
-    OnChange := LayerCollectionChangeHandler;
-    OnGDIUpdate := LayerCollectionGDIUpdateHandler;
-    OnGetViewportScale := LayerCollectionGetViewportScaleHandler;
-    OnGetViewportShift := LayerCollectionGetViewportShiftHandler;
-  end;
+  FLayers := CreateLayerCollection;
 
   FRepaintOptimizer.RegisterLayerCollection(FLayers);
   RepaintMode := rmFull;
@@ -1074,6 +1059,21 @@ begin
   FLayers.Free;
   FBitmap.Free;
   inherited;
+end;
+
+function TCustomImage32.GetLayerCollectionClass: TLayerCollectionClass;
+begin
+  Result := TLayerCollection;
+end;
+
+function TCustomImage32.CreateLayerCollection: TLayerCollection;
+begin
+  Result := GetLayerCollectionClass.Create(Self);
+
+  TLayerCollectionAccess(Result).OnChange := LayerCollectionChangeHandler;
+  TLayerCollectionAccess(Result).OnGDIUpdate := LayerCollectionGDIUpdateHandler;
+  TLayerCollectionAccess(Result).OnGetViewportScale := LayerCollectionGetViewportScaleHandler;
+  TLayerCollectionAccess(Result).OnGetViewportShift := LayerCollectionGetViewportShiftHandler;
 end;
 
 procedure TCustomImage32.BeginUpdate;
@@ -1144,19 +1144,70 @@ end;
 procedure TCustomImage32.BitmapAreaChangeHandler(Sender: TObject;
   const Area: TRect; const Info: Cardinal);
 var
+  NewInfo: Cardinal;
   T, R: TRect;
   Width, Tx, Ty, I, J: Integer;
+  OffsetX, OffsetY: Integer;
+  WidthX, WidthY: Integer;
 begin
   if Sender = FBitmap then
   begin
     T := Area;
-    Width := Trunc(FBitmap.Resampler.Width) + 1;
-    InflateArea(T, Width, Width);
+
+    UpdateCache; // Ensure CachedScaleXY is up to date
+    NewInfo := Info;
+    if (NewInfo and AREAINFO_LINE <> 0) then
+    begin
+      if (T.Left = T.Right) and (T.Top = T.Bottom) then
+        Exit; // Zero length line
+
+      // Unpack line width from Info param
+      Width := integer(NewInfo and (not AREAINFO_MASK));
+
+      // Add line and resampler width and scale value to viewport
+      Width := Ceil((Width + FBitmap.Resampler.Width) * CachedScaleX);
+
+      // Pack width into Info param again
+      NewInfo := AREAINFO_LINE or Width;
+    end else
+    if (T.Left = T.Right) or (T.Top = T.Bottom) then
+      Exit; // Empty rect
+
+    // Make sure rect is positive (i.e. dX >= 0)
+    if (T.Left > T.Right) then
+    begin
+      Swap(T.Left, T.Right);
+      Swap(T.Top, T.Bottom);
+    end;
+
+    // Translate the coordinates from bitmap to viewport
     T.TopLeft := BitmapToControl(T.TopLeft);
     T.BottomRight := BitmapToControl(T.BottomRight);
 
+    if (NewInfo and AREAINFO_LINE <> 0) then
+    begin
+      // Line coordinates specify the center of the pixel.
+      // For example the rect (0, 0, 0, 1) is a one pixel long line while (0, 0, 0, 0) is empty.
+      OffsetX := Round(CachedScaleX / 2);
+      OffsetY := Round(CachedScaleY / 2);
+      GR32.OffsetRect(T, OffsetX, OffsetY);
+    end else
+    begin
+      // Rect coordinates specify the pixel corners.
+      // It is assumed that (Top, Left) specify the top/left corner of the top/left pixel and
+      // that (Right, Bottom) specify the bottom/right corner of the bottom/right pixel.
+      // For example the rect (0, 0, 1, 1) covers just one pixel while (0, 0, 0, 1) is empty.
+      Dec(T.Right);
+      Dec(T.Bottom);
+
+      WidthX := Ceil(FBitmap.Resampler.Width * CachedScaleX);
+      WidthY := Ceil(FBitmap.Resampler.Width * CachedScaleY);
+
+      InflateArea(T, WidthX, WidthY);
+    end;
+
     if FBitmapAlign <> baTile then
-      FRepaintOptimizer.AreaUpdateHandler(Self, T, AREAINFO_RECT)
+      FRepaintOptimizer.AreaUpdateHandler(Self, T, NewInfo)
     else
     begin
       with CachedBitmapRect do
@@ -1167,8 +1218,8 @@ begin
           for I := 0 to Tx do
           begin
             R := T;
-            OffsetRect(R, Right * I, Bottom * J);
-            FRepaintOptimizer.AreaUpdateHandler(Self, R, AREAINFO_RECT);
+            GR32.OffsetRect(R, Right * I, Bottom * J);
+            FRepaintOptimizer.AreaUpdateHandler(Self, R, NewInfo);
           end;
       end;
     end;
@@ -1203,7 +1254,7 @@ begin
           for I := 0 to Tx do
           begin
             R := T;
-            OffsetRect(R, Right * I, Bottom * J);
+            GR32.OffsetRect(R, Right * I, Bottom * J);
             InvalidRects.Add(R);
           end;
       end;
@@ -1243,6 +1294,35 @@ begin
   begin
     Invalidate;
     if Assigned(FOnChange) then FOnChange(Self);
+  end;
+end;
+
+function TCustomImage32.ControlToBitmap(const ARect: TRect): TRect;
+begin
+  // Top/Left rounded down, Bottom/Right rounded up
+  // It is assumed that ARect.Top<=ARect.Bottom and ARect.Left<=ARect.Right
+  UpdateCache;
+  with ARect do
+  begin
+    if (CachedRecScaleX = 0) then
+    begin
+      Result.Left := High(Result.Left);
+      Result.Right := High(Result.Right);
+    end else
+    begin
+      Result.Left := Floor((Left - CachedShiftX) * CachedRecScaleX);
+      Result.Right := Ceil((Right - CachedShiftX) * CachedRecScaleX);
+    end;
+
+    if (CachedRecScaleY = 0) then
+    begin
+      Result.Top := High(Result.Top);
+      Result.Bottom := High(Result.Bottom);
+    end else
+    begin
+      Result.Top := Floor((Top - CachedShiftY) * CachedRecScaleY);
+      Result.Bottom := Ceil((Bottom - CachedShiftY) * CachedRecScaleY);
+    end;
   end;
 end;
 
@@ -1434,7 +1514,7 @@ var
   I, J, Tx, Ty: Integer;
   R: TRect;
 begin
-  if Bitmap.Empty or IsRectEmpty(CachedBitmapRect) then Exit;
+  if Bitmap.Empty or GR32.IsRectEmpty(CachedBitmapRect) then Exit;
   Bitmap.Lock;
   try
     if BitmapAlign <> baTile then Bitmap.DrawTo(Dest, CachedBitmapRect)
@@ -1446,7 +1526,7 @@ begin
         for I := 0 to Tx do
         begin
           R := CachedBitmapRect;
-          OffsetRect(R, Right * I, Bottom * J);
+          GR32.OffsetRect(R, Right * I, Bottom * J);
           Bitmap.DrawTo(Dest, R);
         end;
     end;
@@ -1483,9 +1563,9 @@ begin
     Size := GetBitmapSize;
     Result := Rect(0, 0, Size.Cx, Size.Cy);
     if BitmapAlign = baCenter then
-      OffsetRect(Result, (Width - Size.Cx) div 2, (Height - Size.Cy) div 2)
+      GR32.OffsetRect(Result, (Width - Size.Cx) div 2, (Height - Size.Cy) div 2)
     else if BitmapAlign = baCustom then
-      OffsetRect(Result, Round(OffsetHorz), Round(OffsetVert));
+      GR32.OffsetRect(Result, Round(OffsetHorz), Round(OffsetVert));
   end;
 end;
 
@@ -1675,7 +1755,7 @@ begin
   inherited;
 
   if TabStop and CanFocus then SetFocus;
-  
+
   if Layers.MouseEvents then
     Layer := TLayerCollectionAccess(Layers).MouseDown(Button, Shift, X, Y)
   else
@@ -1704,14 +1784,17 @@ end;
 procedure TCustomImage32.MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 var
   Layer: TCustomLayer;
+  MouseListener: TCustomLayer;
 begin
+  MouseListener := TLayerCollectionAccess(Layers).MouseListener;
+
   if Layers.MouseEvents then
     Layer := TLayerCollectionAccess(Layers).MouseUp(Button, Shift, X, Y)
   else
     Layer := nil;
 
   // unlock the capture using same criteria as was used to acquire it
-  if (Button = mbLeft) or (TLayerCollectionAccess(Layers).MouseListener <> nil) then
+  if (Button = mbLeft) or ((MouseListener <> nil) and (TLayerCollectionAccess(Layers).MouseListener = nil)) then
     MouseCapture := False;
 
   MouseUp(Button, Shift, X, Y, Layer);
@@ -2009,25 +2092,38 @@ end;
 procedure TCustomImgView32.AlignAll;
 var
   ScrollbarVisible: Boolean;
+  ViewPort: TRect;
+  NeedResize: boolean;
 begin
-  if (Width > 0) and (Height > 0) then
-  with GetViewportRect do
+  if (Width <= 0) or (Height <= 0) then
+    Exit;
+
+  NeedResize := False;
+  ViewPort := GetViewportRect;
+  ScrollbarVisible := GetScrollBarsVisible;
+
+  if (HScroll <> nil) then
   begin
-    ScrollbarVisible := GetScrollBarsVisible;
+    NeedResize := (HScroll.Visible <> ScrollbarVisible);
 
-    if Assigned(HScroll) then
-    begin
-      HScroll.BoundsRect := Rect(Left, Bottom, Right, Self.Height);
-      HScroll.Visible := ScrollbarVisible;
-      HScroll.Repaint;
-    end;
+    HScroll.BoundsRect := Rect(ViewPort.Left, ViewPort.Bottom, ViewPort.Right, Self.Height);
+    HScroll.Visible := ScrollbarVisible;
+  end;
 
-    if Assigned(VScroll) then
-    begin
-      VScroll.BoundsRect := Rect(Right, Top, Self.Width, Bottom);
-      VScroll.Visible := ScrollbarVisible;
-      VScroll.Repaint;
-    end;
+  if (VScroll <> nil) then
+  begin
+    NeedResize := NeedResize or (VScroll.Visible <> ScrollbarVisible);
+
+    VScroll.BoundsRect := Rect(ViewPort.Right, ViewPort.Top, Self.Width, ViewPort.Bottom);
+    VScroll.Visible := ScrollbarVisible;
+  end;
+
+  if (NeedResize) then
+  begin
+    // Scrollbars has been shown or hidden. Buffer must resize to align with new viewport.
+    // This will automatically lead to the viewport being redrawn.
+    ResizeBuffer;
+    FBufferValid := False
   end;
 end;
 
@@ -2134,6 +2230,12 @@ end;
 
 function TCustomImgView32.GetScrollBarsVisible: Boolean;
 begin
+  if AutoSize then
+  begin
+    Result := False;
+    Exit;
+  end;
+
   Result := True;
   if Assigned(FScrollBars) and Assigned(HScroll) and Assigned(VScroll) then
   case FScrollBars.Visibility of
@@ -2142,8 +2244,9 @@ begin
     svHidden:
       Result := False;
     svAuto:
-      Result := (HScroll.Range > (TRangeBarAccess(HScroll).EffectiveWindow + VScroll.Width)) or
-                (VScroll.Range > (TRangeBarAccess(VScroll).EffectiveWindow + HScroll.Height));
+      Result := (BitmapAlign = baCustom) and (ScaleMode in [smScale,smNormal]) and
+                ((HScroll.Range > (TRangeBarAccess(HScroll).EffectiveWindow + VScroll.Width)) or
+                 (VScroll.Range > (TRangeBarAccess(VScroll).EffectiveWindow + HScroll.Height)));
   end;
 end;
 
@@ -2225,7 +2328,7 @@ begin
   if IsSizeGripVisible and (Owner is TCustomForm) then
   begin
     P.X := X; P.Y := Y;
-    if PtInRect(GetSizeGripRect, P) then
+    if GR32.PtInRect(GetSizeGripRect, P) then
     begin
       Action := HTBOTTOMRIGHT;
       Application.ProcessMessages;
@@ -2248,7 +2351,7 @@ begin
   if IsSizeGripVisible then
   begin
     P.X := X; P.Y := Y;
-    if PtInRect(GetSizeGripRect, P) then Screen.Cursor := crSizeNWSE;
+    if GR32.PtInRect(GetSizeGripRect, P) then Screen.Cursor := crSizeNWSE;
   end;
 end;
 

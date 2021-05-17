@@ -3,6 +3,7 @@ program DocProcessor;
 {$R 'MainIcon.res' 'MainIcon.rc'}
 
 uses
+  FastMM4,
   Forms,
   MainUnit in 'MainUnit.pas' {MainForm},
   HTML_Tags in 'HTML_Tags.pas',
@@ -13,6 +14,7 @@ uses
   DelphiParse in 'DelphiParse.pas';
 
 begin
+  ReportMemoryLeaksOnShutdown := True;
   Application.Initialize;
   Application.CreateForm(TMainForm, MainForm);
   Application.Run;

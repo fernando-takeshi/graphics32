@@ -40,8 +40,11 @@ uses
   Types, GR32, GR32_Containers, GR32_VPR, GR32_Transforms, GR32_Resamplers;
 
 type
-  { Polygon join style }
-  TJoinStyle = (jsMiter, jsBevel, jsRound);
+  { Polygon join style - used by GR32_VectorUtils.Grow(). }
+  { nb: jsRoundEx rounds both convex and concave joins unlike jsRound which
+    only rounds convex joins. The depth of convex join rounding is controlled
+    by Grow's MiterLimit parameter }
+  TJoinStyle = (jsMiter, jsBevel, jsRound, jsRoundEx);
 
   { Polygon end style }
   TEndStyle = (esButt, esSquare, esRound);
@@ -52,7 +55,6 @@ type
   { TCustomPolygonRenderer }
   TCustomPolygonRenderer = class(TThreadPersistent)
   public
-    constructor Create; override;
     procedure PolyPolygonFS(const Points: TArrayOfArrayOfFloatPoint;
       const ClipRect: TFloatRect; Transformation: TTransformation); overload; virtual;
     procedure PolyPolygonFS(const Points: TArrayOfArrayOfFloatPoint;
@@ -72,7 +74,7 @@ type
   { TPolygonRenderer32 }
   TPolygonRenderer32 = class(TCustomPolygonRenderer)
   private
-    FBitmap: TBitmap32;
+    FBitmap: TCustomBitmap32;
     FFillMode: TPolyFillMode;
     FColor: TColor32;
     FFiller: TCustomPolygonFiller;
@@ -80,13 +82,13 @@ type
     procedure SetFillMode(const Value: TPolyFillMode);
     procedure SetFiller(const Value: TCustomPolygonFiller);
   protected
-    procedure SetBitmap(const Value: TBitmap32); virtual;
+    procedure SetBitmap(const Value: TCustomBitmap32); virtual;
   public
-    constructor Create(Bitmap: TBitmap32; Fillmode: TPolyFillMode = pfWinding); reintroduce; overload;
+    constructor Create(Bitmap: TCustomBitmap32; Fillmode: TPolyFillMode = pfWinding); reintroduce; overload;
     procedure PolygonFS(const Points: TArrayOfFloatPoint); overload; virtual;
     procedure PolyPolygonFS(const Points: TArrayOfArrayOfFloatPoint); overload; virtual;
 
-    property Bitmap: TBitmap32 read FBitmap write SetBitmap;
+    property Bitmap: TCustomBitmap32 read FBitmap write SetBitmap;
     property FillMode: TPolyFillMode read FFillMode write SetFillMode;
     property Color: TColor32 read FColor write SetColor;
     property Filler: TCustomPolygonFiller read FFiller write SetFiller;
@@ -127,10 +129,10 @@ type
 
   { TCustomPolygonFiller }
 
-  TFillLineEvent = procedure(Dst: PColor32; DstX, DstY, Length: Integer; AlphaValues: PColor32) of object;
+  TFillLineEvent = procedure(Dst: PColor32; DstX, DstY, Length: Integer;
+    AlphaValues: PColor32; CombineMode: TCombineMode) of object;
 
   TCustomPolygonFiller = class
-  private
   protected
     function GetFillLine: TFillLineEvent; virtual; abstract;
   public
@@ -154,7 +156,22 @@ type
   TInvertPolygonFiller = class(TCustomPolygonFiller)
   protected
     function GetFillLine: TFillLineEvent; override;
-    procedure FillLineBlend(Dst: PColor32; DstX, DstY, Length: Integer; AlphaValues: PColor32);
+    procedure FillLineBlend(Dst: PColor32; DstX, DstY, Length: Integer;
+      AlphaValues: PColor32; CombineMode: TCombineMode);
+  end;
+
+  { TClearPolygonFiller }
+  TClearPolygonFiller = class(TCustomPolygonFiller)
+  private
+    FColor: TColor32;
+  protected
+    function GetFillLine: TFillLineEvent; override;
+    procedure FillLineClear(Dst: PColor32; DstX, DstY,
+      Length: Integer; AlphaValues: PColor32; CombineMode: TCombineMode);
+  public
+    constructor Create(Color: TColor32 = $00808080); reintroduce; virtual;
+
+    property Color: TColor32 read FColor write FColor;
   end;
 
   { TBitmapPolygonFiller }
@@ -165,10 +182,14 @@ type
     FOffsetX: Integer;
   protected
     function GetFillLine: TFillLineEvent; override;
-    procedure FillLineOpaque(Dst: PColor32; DstX, DstY, Length: Integer; AlphaValues: PColor32);
-    procedure FillLineBlend(Dst: PColor32; DstX, DstY, Length: Integer; AlphaValues: PColor32);
-    procedure FillLineBlendMasterAlpha(Dst: PColor32; DstX, DstY, Length: Integer; AlphaValues: PColor32);
-    procedure FillLineCustomCombine(Dst: PColor32; DstX, DstY, Length: Integer; AlphaValues: PColor32);
+    procedure FillLineOpaque(Dst: PColor32; DstX, DstY,
+      Length: Integer; AlphaValues: PColor32; CombineMode: TCombineMode);
+    procedure FillLineBlend(Dst: PColor32; DstX, DstY,
+      Length: Integer; AlphaValues: PColor32; CombineMode: TCombineMode);
+    procedure FillLineBlendMasterAlpha(Dst: PColor32; DstX, DstY,
+      Length: Integer; AlphaValues: PColor32; CombineMode: TCombineMode);
+    procedure FillLineCustomCombine(Dst: PColor32; DstX, DstY,
+      Length: Integer; AlphaValues: PColor32; CombineMode: TCombineMode);
   public
     property Pattern: TCustomBitmap32 read FPattern write FPattern;
     property OffsetX: Integer read FOffsetX write FOffsetX;
@@ -184,7 +205,8 @@ type
   protected
     procedure SamplerChanged; virtual;
     function GetFillLine: TFillLineEvent; override;
-    procedure SampleLineOpaque(Dst: PColor32; DstX, DstY, Length: Integer; AlphaValues: PColor32);
+    procedure SampleLineOpaque(Dst: PColor32; DstX, DstY, Length: Integer;
+      AlphaValues: PColor32; CombineMode: TCombineMode);
   public
     constructor Create(Sampler: TCustomSampler = nil); reintroduce; virtual;
     procedure BeginRendering; override;
@@ -192,150 +214,150 @@ type
     property Sampler: TCustomSampler read FSampler write SetSampler;
   end;
 
-procedure PolyPolygonFS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolygonFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolyPolygonFS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   Filler: TCustomPolygonFiller; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolygonFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   Filler: TCustomPolygonFiller; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolyPolygonFS_LCD(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolygonFS_LCD(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolygonFS_LCD(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS_LCD(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolyPolygonFS_LCD2(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolygonFS_LCD2(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolygonFS_LCD2(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS_LCD2(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
 
-procedure PolyPolygonFS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   ClipRect: TRect; Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolygonFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   ClipRect: TRect; Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolyPolygonFS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   ClipRect: TRect; Filler: TCustomPolygonFiller; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolygonFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   ClipRect: TRect; Filler: TCustomPolygonFiller; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolyPolygonFS_LCD(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolygonFS_LCD(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   ClipRect: TRect; Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolygonFS_LCD(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS_LCD(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   ClipRect: TRect; Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolyPolygonFS_LCD2(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolygonFS_LCD2(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   ClipRect: TRect; Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolygonFS_LCD2(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS_LCD2(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   ClipRect: TRect; Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
 
 
-procedure PolyPolylineFS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolylineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   Color: TColor32; Closed: Boolean = False; StrokeWidth: TFloat = 1.0;
   JoinStyle: TJoinStyle = jsMiter; EndStyle: TEndStyle = esButt;
   MiterLimit: TFloat = 4.0; Transformation: TTransformation = nil); overload;
-procedure PolyPolylineFS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolylineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   Filler: TCustomPolygonFiller; Closed: Boolean = False; StrokeWidth: TFloat = 1.0;
   JoinStyle: TJoinStyle = jsMiter; EndStyle: TEndStyle = esButt;
   MiterLimit: TFloat = 4.0; Transformation: TTransformation = nil); overload;
 
-procedure PolylineFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolylineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   Color: TColor32; Closed: Boolean = False; StrokeWidth: TFloat = 1.0;
   JoinStyle: TJoinStyle = jsMiter; EndStyle: TEndStyle = esButt;
   MiterLimit: TFloat = 4.0; Transformation: TTransformation = nil); overload;
-procedure PolylineFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolylineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   Filler: TCustomPolygonFiller; Closed: Boolean = False; StrokeWidth: TFloat = 1.0;
   JoinStyle: TJoinStyle = jsMiter; EndStyle: TEndStyle = esButt;
   MiterLimit: TFloat = 4.0; Transformation: TTransformation = nil); overload;
 
 //Filled only Dashes ...
-procedure DashLineFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure DashLineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   const Dashes: TArrayOfFloat; Color: TColor32;
   Closed: Boolean = False; Width: TFloat = 1.0); overload;
-procedure DashLineFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure DashLineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   const Dashes: TArrayOfFloat; FillColor, StrokeColor: TColor32;
   Closed: Boolean; Width: TFloat; StrokeWidth: TFloat = 2.0); overload;
 //Filled and stroked Dashes ...
-procedure DashLineFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure DashLineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   const Dashes: TArrayOfFloat; Filler: TCustomPolygonFiller;
   Closed: Boolean = False; Width: TFloat = 1.0); overload;
-procedure DashLineFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure DashLineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   const Dashes: TArrayOfFloat; Filler: TCustomPolygonFiller; StrokeColor: TColor32;
   Closed: Boolean; Width: TFloat; StrokeWidth: TFloat = 2.0); overload;
 
-procedure PolyPolygonXS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFixedPoint;
+procedure PolyPolygonXS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFixedPoint;
   Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolygonXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure PolygonXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolyPolygonXS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFixedPoint;
+procedure PolyPolygonXS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFixedPoint;
   Filler: TCustomPolygonFiller; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolygonXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure PolygonXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   Filler: TCustomPolygonFiller; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolyPolygonXS_LCD(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFixedPoint;
+procedure PolyPolygonXS_LCD(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFixedPoint;
   Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolygonXS_LCD(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure PolygonXS_LCD(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil);
-procedure PolyPolygonXS_LCD2(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFixedPoint;
+procedure PolyPolygonXS_LCD2(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFixedPoint;
   Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil); overload;
-procedure PolygonXS_LCD2(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure PolygonXS_LCD2(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   Color: TColor32; FillMode: TPolyFillMode = pfAlternate;
   Transformation: TTransformation = nil);
 
-procedure PolyPolylineXS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFixedPoint;
+procedure PolyPolylineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFixedPoint;
   Color: TColor32; Closed: Boolean = False; StrokeWidth: TFixed = $10000;
   JoinStyle: TJoinStyle = jsMiter; EndStyle: TEndStyle = esButt;
   MiterLimit: TFixed = $40000; Transformation: TTransformation = nil); overload;
-procedure PolyPolylineXS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFixedPoint;
+procedure PolyPolylineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFixedPoint;
   Filler: TCustomPolygonFiller; Closed: Boolean = False; StrokeWidth: TFixed = $10000;
   JoinStyle: TJoinStyle = jsMiter; EndStyle: TEndStyle = esButt;
   MiterLimit: TFixed = $40000; Transformation: TTransformation = nil); overload;
 
-procedure PolylineXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure PolylineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   Color: TColor32; Closed: Boolean = False; StrokeWidth: TFixed = $10000;
   JoinStyle: TJoinStyle = jsMiter; EndStyle: TEndStyle = esButt;
   MiterLimit: TFixed = $40000; Transformation: TTransformation = nil); overload;
-procedure PolylineXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure PolylineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   Filler: TCustomPolygonFiller; Closed: Boolean = False; StrokeWidth: TFixed = $10000;
   JoinStyle: TJoinStyle = jsMiter; EndStyle: TEndStyle = esButt;
   MiterLimit: TFixed = $40000; Transformation: TTransformation = nil); overload;
 
 //Filled only Dashes ...
-procedure DashLineXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure DashLineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   const Dashes: TArrayOfFixed; Color: TColor32;
   Closed: Boolean = False; Width: TFixed = $10000); overload;
-procedure DashLineXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure DashLineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   const Dashes: TArrayOfFixed; FillColor, StrokeColor: TColor32;
   Closed: Boolean; Width: TFixed; StrokeWidth: TFixed = $20000); overload;
 //Filled and stroked Dashes ...
-procedure DashLineXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure DashLineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   const Dashes: TArrayOfFixed; Filler: TCustomPolygonFiller;
   Closed: Boolean = False; Width: TFixed = $10000); overload;
-procedure DashLineXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure DashLineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   const Dashes: TArrayOfFixed; Filler: TCustomPolygonFiller; StrokeColor: TColor32;
   Closed: Boolean; Width: TFixed; StrokeWidth: TFixed = $20000); overload;
 
 // fill entire bitmap with a given polygon filler
-procedure FillBitmap(Bitmap: TBitmap32; Filler: TCustomPolygonFiller);
+procedure FillBitmap(Bitmap: TCustomBitmap32; Filler: TCustomPolygonFiller);
 
 { Registration routines }
 procedure RegisterPolygonRenderer(PolygonRendererClass: TCustomPolygonRendererClass);
@@ -347,14 +369,14 @@ var
 implementation
 
 uses
-  Math, SysUtils, GR32_Math, GR32_LowLevel, GR32_Blend,
+  Math, SysUtils, GR32_Math, GR32_LowLevel, GR32_Blend, GR32_Gamma,
   GR32_VectorUtils;
 
 resourcestring
   RCStrNoSamplerSpecified = 'No sampler specified!';
 
 type
-  TBitmap32Access = class(TBitmap32);
+  TBitmap32Access = class(TCustomBitmap32);
 
 procedure RegisterPolygonRenderer(PolygonRendererClass: TCustomPolygonRendererClass);
 begin
@@ -383,7 +405,7 @@ begin
       if V > $10000 then V := $10000;
       V := V * M shr 24;
 {$IFDEF USEGR32GAMMA}
-      V := GAMMA_TABLE[V];
+      V := GAMMA_ENCODING_TABLE[V];
 {$ENDIF}
       C.A := V;
     end;
@@ -405,7 +427,7 @@ begin
     V := Abs(Round(Coverage[I] * $10000));
     if V > $10000 then V := $10000;
 {$IFDEF USEGR32GAMMA}
-    V := GAMMA_TABLE[V * M shr 24];
+    V := GAMMA_ENCODING_TABLE[V * M shr 24];
     AlphaValues[I] := (V shl 24) or C;
 {$ELSE}
     AlphaValues[I] := (V * M and $ff000000) or C;
@@ -435,7 +457,7 @@ begin
         V := V xor $1ffff;
       V := V * M shr 24;
 {$IFDEF USEGR32GAMMA}
-      V := GAMMA_TABLE[V];
+      V := GAMMA_ENCODING_TABLE[V];
 {$ENDIF}
       C.A := V;
     end;
@@ -454,7 +476,7 @@ begin
   if V > $10000 then V := $10000;
   V := V * M shr 24;
 {$IFDEF USEGR32GAMMA}
-  V := GAMMA_TABLE[V];
+  V := GAMMA_ENCODING_TABLE[V];
 {$ENDIF}
   C.A := V;
   FillLongWord(AlphaValues[0], Count, Color);
@@ -472,7 +494,7 @@ begin
   if V > $10000 then V := V xor $1ffff;
   V := V * M shr 24;
 {$IFDEF USEGR32GAMMA}
-  V := GAMMA_TABLE[V];
+  V := GAMMA_ENCODING_TABLE[V];
 {$ENDIF}
   C.A := V;
   FillLongWord(AlphaValues[0], Count, Color);
@@ -491,7 +513,7 @@ begin
   begin
     V := Clamp(Round(Abs(Coverage[I]) * 256));
 {$IFDEF USEGR32GAMMA}
-    V := GAMMA_TABLE[V];
+    V := GAMMA_ENCODING_TABLE[V];
 {$ENDIF}
     AlphaValues[I] := V;
   end;
@@ -509,7 +531,7 @@ begin
     V := V and $000001ff;
     if V >= $100 then V := V xor $1ff;
 {$IFDEF USEGR32GAMMA}
-    V := GAMMA_TABLE[V];
+    V := GAMMA_ENCODING_TABLE[V];
 {$ENDIF}
     AlphaValues[I] := V;
   end;
@@ -522,7 +544,7 @@ var
 begin
   V := Clamp(Round(Abs(Value) * 256));
 {$IFDEF USEGR32GAMMA}
-    V := GAMMA_TABLE[V];
+    V := GAMMA_ENCODING_TABLE[V];
 {$ENDIF}
   FillLongWord(AlphaValues[0], Count, V);
 end;
@@ -536,12 +558,12 @@ begin
   V := V and $000001ff;
   if V >= $100 then V := V xor $1ff;
 {$IFDEF USEGR32GAMMA}
-    V := GAMMA_TABLE[V];
+    V := GAMMA_ENCODING_TABLE[V];
 {$ENDIF}
   FillLongWord(AlphaValues[0], Count, V);
 end;
 
-procedure PolyPolygonFS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   Color: TColor32; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32VPR;
@@ -557,7 +579,7 @@ begin
   end;
 end;
 
-procedure PolygonFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   Color: TColor32; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32VPR;
@@ -573,7 +595,7 @@ begin
   end;
 end;
 
-procedure PolyPolygonFS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   Filler: TCustomPolygonFiller; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32VPR;
@@ -590,7 +612,7 @@ begin
   end;
 end;
 
-procedure PolygonFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   Filler: TCustomPolygonFiller; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32VPR;
@@ -607,7 +629,7 @@ begin
   end;
 end;
 
-procedure PolygonFS_LCD(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS_LCD(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   Color: TColor32; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32LCD;
@@ -623,7 +645,7 @@ begin
   end;
 end;
 
-procedure PolyPolygonFS_LCD(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolygonFS_LCD(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   Color: TColor32; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32LCD;
@@ -639,7 +661,7 @@ begin
   end;
 end;
 
-procedure PolygonFS_LCD2(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS_LCD2(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   Color: TColor32; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32LCD2;
@@ -655,7 +677,7 @@ begin
   end;
 end;
 
-procedure PolyPolygonFS_LCD2(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolygonFS_LCD2(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   Color: TColor32; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32LCD2;
@@ -671,7 +693,7 @@ begin
   end;
 end;
 
-procedure PolyPolygonFS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   ClipRect: TRect; Color: TColor32; FillMode: TPolyFillMode;
   Transformation: TTransformation);
 var
@@ -690,7 +712,7 @@ begin
   end;
 end;
 
-procedure PolygonFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   ClipRect: TRect; Color: TColor32; FillMode: TPolyFillMode;
   Transformation: TTransformation);
 var
@@ -709,7 +731,7 @@ begin
   end;
 end;
 
-procedure PolyPolygonFS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   ClipRect: TRect; Filler: TCustomPolygonFiller; FillMode: TPolyFillMode;
   Transformation: TTransformation);
 var
@@ -729,7 +751,7 @@ begin
   end;
 end;
 
-procedure PolygonFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   ClipRect: TRect; Filler: TCustomPolygonFiller; FillMode: TPolyFillMode;
   Transformation: TTransformation);
 var
@@ -749,7 +771,7 @@ begin
   end;
 end;
 
-procedure PolygonFS_LCD(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS_LCD(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   ClipRect: TRect; Color: TColor32; FillMode: TPolyFillMode;
   Transformation: TTransformation);
 var
@@ -768,7 +790,7 @@ begin
   end;
 end;
 
-procedure PolyPolygonFS_LCD(Bitmap: TBitmap32;
+procedure PolyPolygonFS_LCD(Bitmap: TCustomBitmap32;
   const Points: TArrayOfArrayOfFloatPoint; ClipRect: TRect; Color: TColor32;
   FillMode: TPolyFillMode; Transformation: TTransformation);
 var
@@ -787,7 +809,7 @@ begin
   end;
 end;
 
-procedure PolygonFS_LCD2(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolygonFS_LCD2(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   ClipRect: TRect; Color: TColor32; FillMode: TPolyFillMode;
   Transformation: TTransformation);
 var
@@ -806,7 +828,7 @@ begin
   end;
 end;
 
-procedure PolyPolygonFS_LCD2(Bitmap: TBitmap32;
+procedure PolyPolygonFS_LCD2(Bitmap: TCustomBitmap32;
   const Points: TArrayOfArrayOfFloatPoint; ClipRect: TRect; Color: TColor32;
   FillMode: TPolyFillMode; Transformation: TTransformation);
 var
@@ -825,7 +847,7 @@ begin
   end;
 end;
 
-procedure PolyPolylineFS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolylineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   Color: TColor32; Closed: Boolean; StrokeWidth: TFloat;
   JoinStyle: TJoinStyle; EndStyle: TEndStyle;
   MiterLimit: TFloat; Transformation: TTransformation);
@@ -836,7 +858,7 @@ begin
   PolyPolygonFS(Bitmap, Dst, Color, pfWinding, Transformation);
 end;
 
-procedure PolyPolylineFS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFloatPoint;
+procedure PolyPolylineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFloatPoint;
   Filler: TCustomPolygonFiller; Closed: Boolean = False; StrokeWidth: TFloat = 1.0;
   JoinStyle: TJoinStyle = jsMiter; EndStyle: TEndStyle = esButt;
   MiterLimit: TFloat = 4.0; Transformation: TTransformation = nil);
@@ -847,7 +869,7 @@ begin
   PolyPolygonFS(Bitmap, Dst, Filler, pfWinding, Transformation);
 end;
 
-procedure PolylineFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolylineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   Color: TColor32; Closed: Boolean; StrokeWidth: TFloat;
   JoinStyle: TJoinStyle; EndStyle: TEndStyle;
   MiterLimit: TFloat; Transformation: TTransformation);
@@ -856,7 +878,7 @@ begin
     JoinStyle, EndStyle, MiterLimit, Transformation);
 end;
 
-procedure PolylineFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure PolylineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   Filler: TCustomPolygonFiller; Closed: Boolean = False; StrokeWidth: TFloat = 1.0;
   JoinStyle: TJoinStyle = jsMiter; EndStyle: TEndStyle = esButt;
   MiterLimit: TFloat = 4.0; Transformation: TTransformation = nil);
@@ -865,7 +887,7 @@ begin
     JoinStyle, EndStyle, MiterLimit, Transformation);
 end;
 
-procedure DashLineFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure DashLineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   const Dashes: TArrayOfFloat; Color: TColor32;
   Closed: Boolean = False; Width: TFloat = 1.0);
 var
@@ -875,7 +897,7 @@ begin
   PolyPolylineFS(Bitmap, MultiPoly, Color, False, Width);
 end;
 
-procedure DashLineFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure DashLineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   const Dashes: TArrayOfFloat; FillColor, StrokeColor: TColor32;
   Closed: Boolean; Width: TFloat; StrokeWidth: TFloat = 2.0);
 var
@@ -887,7 +909,7 @@ begin
   PolyPolylineFS(Bitmap, MultiPoly, StrokeColor, True, StrokeWidth);
 end;
 
-procedure DashLineFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure DashLineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   const Dashes: TArrayOfFloat; Filler: TCustomPolygonFiller;
   Closed: Boolean = False; Width: TFloat = 1.0);
 var
@@ -897,7 +919,7 @@ begin
   PolyPolylineFS(Bitmap, MultiPoly, Filler, False, Width);
 end;
 
-procedure DashLineFS(Bitmap: TBitmap32; const Points: TArrayOfFloatPoint;
+procedure DashLineFS(Bitmap: TCustomBitmap32; const Points: TArrayOfFloatPoint;
   const Dashes: TArrayOfFloat; Filler: TCustomPolygonFiller; StrokeColor: TColor32;
   Closed: Boolean; Width: TFloat; StrokeWidth: TFloat = 2.0);
 var
@@ -910,7 +932,7 @@ begin
 end;
 
 
-procedure PolyPolygonXS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFixedPoint;
+procedure PolyPolygonXS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFixedPoint;
   Color: TColor32; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32VPR;
@@ -927,7 +949,7 @@ begin
   end;
 end;
 
-procedure PolygonXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure PolygonXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   Color: TColor32; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32VPR;
@@ -944,7 +966,7 @@ begin
   end;
 end;
 
-procedure PolyPolygonXS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFixedPoint;
+procedure PolyPolygonXS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFixedPoint;
   Filler: TCustomPolygonFiller; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32VPR;
@@ -961,7 +983,7 @@ begin
   end;
 end;
 
-procedure PolygonXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure PolygonXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   Filler: TCustomPolygonFiller; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32VPR;
@@ -978,7 +1000,7 @@ begin
   end;
 end;
 
-procedure PolygonXS_LCD(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure PolygonXS_LCD(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   Color: TColor32; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32LCD;
@@ -995,7 +1017,7 @@ begin
   end;
 end;
 
-procedure PolyPolygonXS_LCD(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFixedPoint;
+procedure PolyPolygonXS_LCD(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFixedPoint;
   Color: TColor32; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32LCD;
@@ -1012,7 +1034,7 @@ begin
   end;
 end;
 
-procedure PolygonXS_LCD2(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure PolygonXS_LCD2(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   Color: TColor32; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32LCD2;
@@ -1029,7 +1051,7 @@ begin
   end;
 end;
 
-procedure PolyPolygonXS_LCD2(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFixedPoint;
+procedure PolyPolygonXS_LCD2(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFixedPoint;
   Color: TColor32; FillMode: TPolyFillMode; Transformation: TTransformation);
 var
   Renderer: TPolygonRenderer32LCD2;
@@ -1046,7 +1068,7 @@ begin
   end;
 end;
 
-procedure PolyPolylineXS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFixedPoint;
+procedure PolyPolylineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFixedPoint;
   Color: TColor32; Closed: Boolean; StrokeWidth: TFixed;
   JoinStyle: TJoinStyle; EndStyle: TEndStyle;
   MiterLimit: TFixed; Transformation: TTransformation);
@@ -1058,7 +1080,7 @@ begin
   PolyPolygonXS(Bitmap, Dst, Color, pfWinding, Transformation);
 end;
 
-procedure PolyPolylineXS(Bitmap: TBitmap32; const Points: TArrayOfArrayOfFixedPoint;
+procedure PolyPolylineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfArrayOfFixedPoint;
   Filler: TCustomPolygonFiller; Closed: Boolean = False;
   StrokeWidth: TFixed = $10000; JoinStyle: TJoinStyle = jsMiter;
   EndStyle: TEndStyle = esButt; MiterLimit: TFixed = $40000;
@@ -1071,7 +1093,7 @@ begin
   PolyPolygonXS(Bitmap, Dst, Filler, pfWinding, Transformation);
 end;
 
-procedure PolylineXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure PolylineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   Color: TColor32; Closed: Boolean; StrokeWidth: TFixed;
   JoinStyle: TJoinStyle; EndStyle: TEndStyle;
   MiterLimit: TFixed; Transformation: TTransformation);
@@ -1081,7 +1103,7 @@ begin
     MiterLimit, Transformation);
 end;
 
-procedure PolylineXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure PolylineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   Filler: TCustomPolygonFiller; Closed: Boolean = False;
   StrokeWidth: TFixed = $10000; JoinStyle: TJoinStyle = jsMiter;
   EndStyle: TEndStyle = esButt; MiterLimit: TFixed = $40000;
@@ -1091,7 +1113,7 @@ begin
     JoinStyle, EndStyle, MiterLimit, Transformation);
 end;
 
-procedure DashLineXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure DashLineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   const Dashes: TArrayOfFixed; Color: TColor32;
   Closed: Boolean = False; Width: TFixed = $10000);
 var
@@ -1101,7 +1123,7 @@ begin
   PolyPolylineXS(Bitmap, MultiPoly, Color, False, Width);
 end;
 
-procedure DashLineXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure DashLineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   const Dashes: TArrayOfFixed; FillColor, StrokeColor: TColor32;
   Closed: Boolean; Width: TFixed; StrokeWidth: TFixed = $20000);
 var
@@ -1113,7 +1135,7 @@ begin
   PolyPolylineXS(Bitmap, MultiPoly, StrokeColor, True, strokeWidth);
 end;
 
-procedure DashLineXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure DashLineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   const Dashes: TArrayOfFixed; Filler: TCustomPolygonFiller;
   Closed: Boolean = False; Width: TFixed = $10000);
 var
@@ -1123,7 +1145,7 @@ begin
   PolyPolylineXS(Bitmap, MultiPoly, Filler, False, Width);
 end;
 
-procedure DashLineXS(Bitmap: TBitmap32; const Points: TArrayOfFixedPoint;
+procedure DashLineXS(Bitmap: TCustomBitmap32; const Points: TArrayOfFixedPoint;
   const Dashes: TArrayOfFixed; Filler: TCustomPolygonFiller; StrokeColor: TColor32;
   Closed: Boolean; Width: TFixed; StrokeWidth: TFixed = $20000);
 var
@@ -1135,7 +1157,7 @@ begin
   PolyPolylineXS(Bitmap, MultiPoly, StrokeColor, True, StrokeWidth);
 end;
 
-procedure FillBitmap(Bitmap: TBitmap32; Filler: TCustomPolygonFiller);
+procedure FillBitmap(Bitmap: TCustomBitmap32; Filler: TCustomPolygonFiller);
 var
   AlphaValues: PColor32;
   Y: Integer;
@@ -1148,7 +1170,8 @@ begin
   FillLongword(AlphaValues^, Bitmap.Width, $FF);
   Filler.BeginRendering;
   for Y := 0 to Bitmap.Height - 1 do
-    Filler.FillLine(PColor32(Bitmap.ScanLine[y]), 0, y, Bitmap.Width, AlphaValues);
+    Filler.FillLine(PColor32(Bitmap.ScanLine[y]), 0, y, Bitmap.Width,
+      AlphaValues, Bitmap.CombineMode);
   Filler.EndRendering;
   {$IFDEF USESTACKALLOC}
   StackFree(AlphaValues);
@@ -1197,7 +1220,7 @@ begin
     end;
     Inc(AlphaValues[I], V);
 {$IFDEF USEGR32GAMMA}
-    AlphaValues[I] := GAMMA_TABLE[AlphaValues[I]];
+    AlphaValues[I] := GAMMA_ENCODING_TABLE[AlphaValues[I]];
 {$ENDIF}
     Inc(AlphaValues[I + 1], V);
     AlphaValues[I + 2] := V;
@@ -1231,7 +1254,7 @@ begin
     end;
     Inc(AlphaValues[I], V);
 {$IFDEF USEGR32GAMMA}
-    AlphaValues[I] := GAMMA_TABLE[AlphaValues[I]];
+    AlphaValues[I] := GAMMA_ENCODING_TABLE[AlphaValues[I]];
 {$ENDIF}
     Inc(AlphaValues[I + 1], V);
     AlphaValues[I + 2] := V;
@@ -1334,12 +1357,12 @@ end;
 { TInvertPolygonFiller }
 
 procedure TInvertPolygonFiller.FillLineBlend(Dst: PColor32; DstX, DstY,
-  Length: Integer; AlphaValues: PColor32);
+  Length: Integer; AlphaValues: PColor32; CombineMode: TCombineMode);
 var
   X: Integer;
   BlendMemEx: TBlendMemEx;
 begin
-  BlendMemEx := BLEND_MEM_EX[cmBlend]^;
+  BlendMemEx := BLEND_MEM_EX[CombineMode]^;
   for X := DstX to DstX + Length - 1 do
   begin
     BlendMemEx(InvertColor(Dst^), Dst^, AlphaValues^);
@@ -1355,10 +1378,30 @@ begin
 end;
 
 
+{ TClearPolygonFiller }
+
+constructor TClearPolygonFiller.Create(Color: TColor32 = $00808080);
+begin
+  inherited Create;
+  FColor := Color;
+end;
+
+procedure TClearPolygonFiller.FillLineClear(Dst: PColor32; DstX, DstY,
+  Length: Integer; AlphaValues: PColor32; CombineMode: TCombineMode);
+begin
+  FillLongword(Dst^, Length, FColor);
+end;
+
+function TClearPolygonFiller.GetFillLine: TFillLineEvent;
+begin
+  Result := FillLineClear;
+end;
+
+
 { TBitmapPolygonFiller }
 
 procedure TBitmapPolygonFiller.FillLineOpaque(Dst: PColor32; DstX, DstY,
-  Length: Integer; AlphaValues: PColor32);
+  Length: Integer; AlphaValues: PColor32; CombineMode: TCombineMode);
 var
   PatternX, PatternY, X: Integer;
   OpaqueAlpha: TColor32;
@@ -1401,7 +1444,8 @@ begin
     end;
 end;
 
-procedure TBitmapPolygonFiller.FillLineBlend(Dst: PColor32; DstX, DstY, Length: Integer; AlphaValues: PColor32);
+procedure TBitmapPolygonFiller.FillLineBlend(Dst: PColor32; DstX, DstY,
+  Length: Integer; AlphaValues: PColor32; CombineMode: TCombineMode);
 var
   PatternX, PatternY, X: Integer;
   Src: PColor32;
@@ -1446,8 +1490,9 @@ begin
   end;
 end;
 
-procedure TBitmapPolygonFiller.FillLineBlendMasterAlpha(Dst: PColor32; DstX, DstY,
-  Length: Integer; AlphaValues: PColor32);
+procedure TBitmapPolygonFiller.FillLineBlendMasterAlpha(Dst: PColor32;
+  DstX, DstY, Length: Integer; AlphaValues: PColor32;
+  CombineMode: TCombineMode);
 var
   PatternX, PatternY, X: Integer;
   Src: PColor32;
@@ -1487,8 +1532,9 @@ begin
     end;
 end;
 
-procedure TBitmapPolygonFiller.FillLineCustomCombine(Dst: PColor32; DstX, DstY,
-  Length: Integer; AlphaValues: PColor32);
+procedure TBitmapPolygonFiller.FillLineCustomCombine(Dst: PColor32;
+  DstX, DstY, Length: Integer; AlphaValues: PColor32;
+  CombineMode: TCombineMode);
 var
   PatternX, PatternY, X: Integer;
   Src: PColor32;
@@ -1566,12 +1612,12 @@ begin
 end;
 
 procedure TSamplerFiller.SampleLineOpaque(Dst: PColor32; DstX, DstY,
-  Length: Integer; AlphaValues: PColor32);
+  Length: Integer; AlphaValues: PColor32; CombineMode: TCombineMode);
 var
   X: Integer;
   BlendMemEx: TBlendMemEx;
 begin
-  BlendMemEx := BLEND_MEM_EX[cmBlend]^;
+  BlendMemEx := BLEND_MEM_EX[CombineMode]^;
   for X := DstX to DstX + Length - 1 do
   begin
     BlendMemEx(FGetSample(X, DstY) and $00FFFFFF or $FF000000, Dst^, AlphaValues^);
@@ -1612,11 +1658,6 @@ end;
 
 { TCustomPolygonRenderer }
 
-constructor TCustomPolygonRenderer.Create;
-begin
-
-end;
-
 procedure TCustomPolygonRenderer.PolygonFS(
   const Points: TArrayOfFloatPoint; const ClipRect: TFloatRect;
   Transformation: TTransformation);
@@ -1651,7 +1692,7 @@ end;
 
 { TPolygonRenderer32 }
 
-constructor TPolygonRenderer32.Create(Bitmap: TBitmap32;
+constructor TPolygonRenderer32.Create(Bitmap: TCustomBitmap32;
   Fillmode: TPolyFillMode);
 begin
   inherited Create;
@@ -1669,7 +1710,7 @@ begin
   PolyPolygonFS(Points, FloatRect(FBitmap.ClipRect));
 end;
 
-procedure TPolygonRenderer32.SetBitmap(const Value: TBitmap32);
+procedure TPolygonRenderer32.SetBitmap(const Value: TCustomBitmap32);
 begin
   if FBitmap <> Value then
   begin
@@ -1723,7 +1764,7 @@ begin
   {$ENDIF}
   FFillProc(Span.Values, AlphaValues, Count, FColor);
   FFiller.FillLine(@Bitmap.ScanLine[DstY][Span.X1], Span.X1, DstY, Count,
-    PColor32(AlphaValues));
+    PColor32(AlphaValues), Bitmap.CombineMode);
   EMMS;
   {$IFDEF USESTACKALLOC}
   StackFree(AlphaValues);
@@ -1783,7 +1824,8 @@ begin
   {$ENDIF}
   FFillProc(Span.Values, AlphaValues, Count, FColor);
   if Bitmap.CombineMode = cmMerge then
-    MergeLine(@AlphaValues[0], @Bitmap.ScanLine[DstY][Span.X1], Count) else
+    MergeLine(@AlphaValues[0], @Bitmap.ScanLine[DstY][Span.X1], Count)
+  else
     BlendLine(@AlphaValues[0], @Bitmap.ScanLine[DstY][Span.X1], Count);
   EMMS;
   {$IFDEF USESTACKALLOC}

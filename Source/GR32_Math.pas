@@ -38,7 +38,8 @@ interface
 
 {$I GR32.inc}
 
-uses GR32;
+uses
+  GR32, GR32_Bindings;
 
 { Fixed point math routines }
 function FixedFloor(A: TFixed): Integer;
@@ -119,6 +120,9 @@ type
 
 var
   CumSum: TCumSumProc;
+
+var
+  MathRegistry: TFunctionRegistry;
 
 implementation
 
@@ -612,6 +616,7 @@ begin
   Result := Round(Math.Hypot(X, Y));
 (*
 {$ELSE}
+{$IFDEF FPC}assembler;{$ENDIF}
 asm
 {$IFDEF TARGET_x64}
         IMUL    RAX, RCX, RDX
@@ -1103,7 +1108,7 @@ asm
         CMP     EDX,2       // if count < 2, exit
         JL      @END
 
-        MOV     EAX,ECX
+        MOV     RAX,RCX
         MOV     ECX,EDX
 
         CMP     ECX,32      // if count < 32, avoid SSE2 overhead
@@ -1122,7 +1127,7 @@ asm
         SAR     ECX,2        // div with 4 to get cnt
         SUB     EDX,ECX
 
-        ADD     EAX,4
+        ADD     RAX,4
         DEC     ECX
         JZ      @SETUPLAST   // one element
 
@@ -1130,7 +1135,7 @@ asm
         FLD     DWORD PTR [RAX - 4]
         FADD    DWORD PTR [RAX]
         FSTP    DWORD PTR [RAX]
-        ADD     EAX,4
+        ADD     RAX,4
         DEC     ECX
         JNZ     @ALIGNINGLOOP
 
@@ -1168,7 +1173,7 @@ asm
 @SKIP:
         PREFETCHNTA [RAX + 32 * 2]
         MOVAPS  [RAX],XMM0
-        ADD     EAX,16
+        ADD     RAX,16
         SUB     ECX,1
         JNZ     @LOOP
         MOV     ECX,EDX
@@ -1182,20 +1187,19 @@ asm
         FLD     DWORD PTR [RAX - 4]
         FADD    DWORD PTR [RAX]
         FSTP    DWORD PTR [RAX]
-        ADD     EAX,4
+        ADD     RAX,4
         DEC     ECX
         JNZ     @LOOP2
         JMP     @END
 
 @SMALL:
-        MOV     ECX,EDX
-        ADD     EAX,4
+        ADD     RAX,4
         DEC     ECX
 @LOOP3:
         FLD     DWORD PTR [RAX - 4]
         FADD    DWORD PTR [RAX]
         FSTP    DWORD PTR [RAX]
-        ADD     EAX,4
+        ADD     RAX,4
         DEC     ECX
         JNZ     @LOOP3
 {$ENDIF}
@@ -1204,12 +1208,31 @@ end;
 {$ENDIF}
 
 
-initialization
-{$IFNDEF PUREPASCAL}
-  if HasInstructionSet(ciSSE2) then
-    CumSum := CumSum_SSE2
-  else
-{$ENDIF}
-    CumSum := CumSum_Pas;
+const
+  FID_CUMSUM = 0;
 
+const
+  MathBindingFlagPascal = $0001;
+
+procedure RegisterBindings;
+begin
+  MathRegistry := NewRegistry('GR32_Math bindings');
+
+  MathRegistry.RegisterBinding(FID_CUMSUM, @@CumSum);
+
+  // pure pascal
+  MathRegistry.Add(FID_CUMSUM, @CumSum_Pas, [], MathBindingFlagPascal);
+
+{$IFNDEF PUREPASCAL}
+{$IFNDEF OMIT_SSE2}
+  // SSE2
+  MathRegistry.Add(FID_CUMSUM, @CumSum_SSE2, [ciSSE2]);
+{$ENDIF}
+{$ENDIF}
+
+  MathRegistry.RebindAll;
+end;
+
+initialization
+  RegisterBindings;
 end.

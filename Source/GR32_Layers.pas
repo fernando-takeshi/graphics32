@@ -121,7 +121,7 @@ type
     property OnGetViewportScale: TGetScaleEvent read FOnGetViewportScale write FOnGetViewportScale;
     property OnGetViewportShift: TGetShiftEvent read FOnGetViewportShift write FOnGetViewportShift;
   public
-    constructor Create(AOwner: TPersistent);
+    constructor Create(AOwner: TPersistent); virtual;
     destructor Destroy; override;
 
     function  Add(ItemClass: TLayerClass): TCustomLayer;
@@ -140,6 +140,8 @@ type
     property MouseListener: TCustomLayer read FMouseListener write SetMouseListener;
     property MouseEvents: Boolean read FMouseEvents write SetMouseEvents;
   end;
+
+  TLayerCollectionClass = class of TLayerCollection;
 
 {$IFDEF COMPILER2009_UP}
   TLayerEnum = class
@@ -328,7 +330,7 @@ type
     FHandleFrame: TColor32;
     FHandleFill: TColor32;
     FHandles: TRBHandles;
-    FHandleSize: Integer;
+    FHandleSize: TFloat;
     FMinWidth: TFloat;
     FMaxHeight: TFloat;
     FMinHeight: TFloat;
@@ -345,7 +347,7 @@ type
     procedure SetHandleFill(Value: TColor32);
     procedure SetHandleFrame(Value: TColor32);
     procedure SetHandles(Value: TRBHandles);
-    procedure SetHandleSize(Value: Integer);
+    procedure SetHandleSize(Value: TFloat);
     procedure SetOptions(const Value: TRBOptions);
     procedure SetQuantized(const Value: Integer);
   protected
@@ -366,7 +368,8 @@ type
     procedure SetLayerOptions(Value: Cardinal); override;
     procedure SetDragState(const Value: TRBDragState); overload;
     procedure SetDragState(const Value: TRBDragState; const X, Y: Integer); overload;
-    procedure UpdateChildLayer;
+    procedure UpdateChildLayer; virtual;
+    procedure DrawHandle(Buffer: TBitmap32; X, Y: TFloat); virtual;
   public
     constructor Create(ALayerCollection: TLayerCollection); override;
     destructor Destroy; override;
@@ -377,7 +380,7 @@ type
     property ChildLayer: TPositionedLayer read FChildLayer write SetChildLayer;
     property Options: TRBOptions read FOptions write SetOptions;
     property Handles: TRBHandles read FHandles write SetHandles;
-    property HandleSize: Integer read FHandleSize write SetHandleSize;
+    property HandleSize: TFloat read FHandleSize write SetHandleSize;
     property HandleFill: TColor32 read FHandleFill write SetHandleFill;
     property HandleFrame: TColor32 read FHandleFrame write SetHandleFrame;
     property FrameStippleStep: TFloat read FFrameStippleStep write SetFrameStippleStep;
@@ -397,7 +400,7 @@ type
 implementation
 
 uses
-  TypInfo, GR32_Image, GR32_LowLevel, GR32_Resamplers, GR32_RepaintOpt;
+  TypInfo, GR32_Image, GR32_LowLevel, GR32_Resamplers, GR32_RepaintOpt, Types;
 
 { mouse state mapping }
 const
@@ -472,6 +475,8 @@ end;
 
 constructor TLayerCollection.Create(AOwner: TPersistent);
 begin
+  inherited Create;
+
   FOwner := AOwner;
   FItems := TList.Create;
   FMouseEvents := True;
@@ -1012,9 +1017,12 @@ end;
 
 procedure TCustomLayer.SetLayerOptions(Value: Cardinal);
 begin
-  Changing;
-  FLayerOptions := Value;
-  Changed;
+  if (FLayerOptions <> Value) then
+  begin
+    Changing;
+    FLayerOptions := Value;
+    Changed;
+  end;
 end;
 
 procedure TCustomLayer.SetMouseEvents(Value: Boolean);
@@ -1227,8 +1235,8 @@ begin
   if Bitmap.Empty then Exit;
   DstRect := MakeRect(GetAdjustedRect(FLocation));
   ClipRect := Buffer.ClipRect;
-  IntersectRect(TempRect, ClipRect, DstRect);
-  if IsRectEmpty(TempRect) then Exit;
+  GR32.IntersectRect(TempRect, ClipRect, DstRect);
+  if GR32.IsRectEmpty(TempRect) then Exit;
 
   SrcRect := MakeRect(0, 0, Bitmap.Width, Bitmap.Height);
   if Cropped and (LayerCollection.FOwner is TCustomImage32) and
@@ -1241,7 +1249,7 @@ begin
     end;
     if (LayerWidth < 0.5) or (LayerHeight < 0.5) then Exit;
     ImageRect := TCustomImage32(LayerCollection.FOwner).GetBitmapRect;
-    IntersectRect(ClipRect, ClipRect, ImageRect);
+    GR32.IntersectRect(ClipRect, ClipRect, ImageRect);
   end;
   StretchTransfer(Buffer, DstRect, ClipRect, FBitmap, SrcRect,
     FBitmap.Resampler, FBitmap.DrawMode, FBitmap.OnPixelCombine);
@@ -1319,7 +1327,10 @@ end;
 
 function TRubberbandLayer.DoHitTest(X, Y: Integer): Boolean;
 begin
-  Result := GetDragState(X, Y) <> dsNone;
+  if (Visible) then
+    Result := (GetDragState(X, Y) <> dsNone)
+  else
+    Result := False;
 end;
 
 procedure TRubberbandLayer.DoResizing(var OldLocation,
@@ -1348,9 +1359,11 @@ var
   dh_center, dh_sides, dh_corners: Boolean;
   dl, dt, dr, db, dx, dy: Boolean;
   Sz: Integer;
+const
+  DragZone = 1;
 begin
   Result := dsNone;
-  Sz := FHandleSize + 1;
+  Sz := Ceil(FHandleSize + DragZone);
   dh_center := rhCenter in FHandles;
   dh_sides := rhSides in FHandles;
   dh_corners := rhCorners in FHandles;
@@ -1376,7 +1389,7 @@ begin
   else if db and dx and dh_sides and not(rhNotBottomSide in FHandles) then Result := dsSizeB
   else if dl and dy and dh_sides and not(rhNotLeftSide in FHandles) then Result := dsSizeL
   else if dt and dx and dh_sides and not(rhNotTopSide in FHandles) then Result := dsSizeT
-  else if dh_center and PtInRect(R, Point(X, Y)) then Result := dsMove;
+  else if dh_center and GR32.PtInRect(R, GR32.Point(X, Y)) then Result := dsMove;
 end;
 
 procedure TRubberbandLayer.MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
@@ -1417,7 +1430,7 @@ const
 var
   Mx, My: TFloat;
   L, T, R, B, W, H: TFloat;
-  Quantize: Boolean;
+  LQuantize: Boolean;
   ALoc, NewLocation: TFloatRect;
 
   procedure IncLT(var LT, RB: TFloat; Delta, MinSize, MaxSize: TFloat);
@@ -1451,7 +1464,7 @@ begin
     with Location do
     begin
       ALoc := GetAdjustedRect(FLocation);
-      if IsRectEmpty(ALoc) then Exit;
+      if GR32.IsRectEmpty(ALoc) then Exit;
       Mx := (Mx - ALoc.Left) / (ALoc.Right - ALoc.Left) * (Right - Left) + Left;
       My := (My - ALoc.Top) / (ALoc.Bottom - ALoc.Top) * (Bottom - Top) + Top;
     end;
@@ -1466,13 +1479,13 @@ begin
       H := B - T;
     end;
 
-    Quantize := (roQuantized in Options) and not (ssAlt in Shift);
+    LQuantize := (roQuantized in Options) and not (ssAlt in Shift);
 
     if FDragState = dsMove then
     begin
       L := Mx;
       T := My;
-      if Quantize then
+      if LQuantize then
       begin
         L := Round(L / FQuantized) * FQuantized;
         T := Round(T / FQuantized) * FQuantized;
@@ -1485,28 +1498,28 @@ begin
       if FDragState in [dsSizeL, dsSizeTL, dsSizeBL] then
       begin
         IncLT(L, R, Mx - L, MinWidth, MaxWidth);
-        if Quantize then
+        if LQuantize then
           L := Round(L / FQuantized) * FQuantized;
       end;
 
       if FDragState in [dsSizeR, dsSizeTR, dsSizeBR] then
       begin
         IncRB(L, R, Mx - R, MinWidth, MaxWidth);
-        if Quantize then
+        if LQuantize then
           R := Round(R / FQuantized) * FQuantized;
       end;
 
       if FDragState in [dsSizeT, dsSizeTL, dsSizeTR] then
       begin
         IncLT(T, B, My - T, MinHeight, MaxHeight);
-        if Quantize then
+        if LQuantize then
           T := Round(T / FQuantized) * FQuantized;
       end;
 
       if FDragState in [dsSizeB, dsSizeBL, dsSizeBR] then
       begin
         IncRB(T, B, My - B, MinHeight, MaxHeight);
-        if Quantize then
+        if LQuantize then
           B := Round(B / FQuantized) * FQuantized;
       end;
     end;
@@ -1580,17 +1593,29 @@ begin
     FChildLayer := nil;
 end;
 
-procedure TRubberbandLayer.Paint(Buffer: TBitmap32);
+procedure TRubberbandLayer.DrawHandle(Buffer: TBitmap32; X, Y: TFloat);
 var
-  Cx, Cy: Integer;
+  HandleRect: TRect;
+begin
+  // Coordinate specifies exact center of handle. I.e. center of
+  // pixel if handle is odd number of pixels wide.
+
+  HandleRect.Left := Floor(X - FHandleSize);
+  HandleRect.Right := HandleRect.Left + Ceil(FHandleSize*2);
+  HandleRect.Top := Floor(Y - FHandleSize);
+  HandleRect.Bottom := HandleRect.Top + Ceil(FHandleSize*2);
+
+  Buffer.FrameRectTS(HandleRect, FHandleFrame);
+
+  GR32.InflateRect(HandleRect, -1, -1);
+  Buffer.FillRectTS(HandleRect, FHandleFill);
+end;
+
+procedure TRubberbandLayer.Paint(Buffer: TBitmap32);
+
+var
+  CenterX, CenterY: TFloat;
   R: TRect;
-
-  procedure DrawHandle(X, Y: Integer);
-  begin
-    Buffer.FillRectTS(X - FHandleSize, Y - FHandleSize, X + FHandleSize, Y + FHandleSize, FHandleFill);
-    Buffer.FrameRectTS(X - FHandleSize, Y - FHandleSize, X + FHandleSize, Y + FHandleSize, FHandleFrame);
-  end;
-
 begin
   R := MakeRect(GetAdjustedRect(FLocation));
   with R do
@@ -1605,19 +1630,19 @@ begin
     end;
     if rhCorners in FHandles then
     begin
-      if not(rhNotTLCorner in FHandles) then DrawHandle(Left, Top);
-      if not(rhNotTRCorner in FHandles) then DrawHandle(Right, Top);
-      if not(rhNotBLCorner in FHandles) then DrawHandle(Left, Bottom);
-      if not(rhNotBRCorner in FHandles) then DrawHandle(Right, Bottom);
+      if not(rhNotTLCorner in FHandles) then DrawHandle(Buffer, Left+0.5, Top+0.5);
+      if not(rhNotTRCorner in FHandles) then DrawHandle(Buffer, Right-0.5, Top+0.5);
+      if not(rhNotBLCorner in FHandles) then DrawHandle(Buffer, Left+0.5, Bottom-0.5);
+      if not(rhNotBRCorner in FHandles) then DrawHandle(Buffer, Right-0.5, Bottom-0.5);
     end;
     if rhSides in FHandles then
     begin
-      Cx := (Left + Right) div 2;
-      Cy := (Top + Bottom) div 2;
-      if not(rhNotTopSide in FHandles) then DrawHandle(Cx, Top);
-      if not(rhNotLeftSide in FHandles) then DrawHandle(Left, Cy);
-      if not(rhNotRightSide in FHandles) then DrawHandle(Right, Cy);
-      if not(rhNotBottomSide in FHandles) then DrawHandle(Cx, Bottom);
+      CenterX := (Left + Right) / 2;
+      CenterY := (Top + Bottom) / 2;
+      if not(rhNotTopSide in FHandles) then DrawHandle(Buffer, CenterX, Top+0.5);
+      if not(rhNotLeftSide in FHandles) then DrawHandle(Buffer, Left+0.5, CenterY);
+      if not(rhNotRightSide in FHandles) then DrawHandle(Buffer, Right-0.5, CenterY);
+      if not(rhNotBottomSide in FHandles) then DrawHandle(Buffer, CenterX, Bottom-0.5);
     end;
   end;
 end;
@@ -1698,9 +1723,10 @@ begin
   end;
 end;
 
-procedure TRubberbandLayer.SetHandleSize(Value: Integer);
+procedure TRubberbandLayer.SetHandleSize(Value: TFloat);
 begin
-  if Value < 1 then Value := 1;
+  if Value < 1 then
+    Value := 1;
   if Value <> FHandleSize then
   begin
     FHandleSize := Value;

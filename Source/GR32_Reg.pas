@@ -60,6 +60,7 @@ uses
   GR32_Layers,
   GR32_RangeBars,
   GR32_ColorPicker,
+  GR32_ColorSwatch,
   GR32_Resamplers;
 
 { Registration }
@@ -67,7 +68,9 @@ procedure Register;
 begin
   RegisterComponents('Graphics32', [TPaintBox32, TImage32, TBitmap32List,
     TRangeBar, TGaugeBar, TImgView32{$IFDEF Windows}, TSyntheticImage32{$ENDIF},
-    TColorPickerHS, TColorPickerHSV, TColorPickerGTK]);
+    TColorPickerComponent, TColorPickerRGBA, TColorPickerHS, TColorPickerHSV,
+    TColorPickerGTK, {$IFDEF COMPILER2010_UP} TColor32Dialog,{$ENDIF}
+    TColorSwatch]);
   RegisterPropertyEditor(TypeInfo(TColor32), nil, '', TColor32Property);
   RegisterPropertyEditor(TypeInfo(TBitmap32), nil, '', TBitmap32Property);
   RegisterComponentEditor(TCustomImage32, TImage32Editor);
@@ -84,3 +87,4 @@ initialization
   {$ENDIF}
 
 end.
+
